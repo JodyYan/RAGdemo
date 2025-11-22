@@ -1,53 +1,45 @@
 import streamlit as st
 import os
 
-# --- 1. 引入 Groq 與 HuggingFace ---
+# --- 1. 引入必要套件 ---
 try:
     from langchain_groq import ChatGroq
     from langchain_huggingface import HuggingFaceEmbeddings
-except ImportError:
-    st.error("缺少必要套件，請檢查 requirements.txt")
+    from langchain_community.vectorstores import FAISS
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_core.documents import Document
+    from langchain_core.prompts import ChatPromptTemplate
+except ImportError as e:
+    st.error(f"環境錯誤: {e}")
     st.stop()
 
-# --- 2. 基礎組件 ---
-from langchain_community.vectorstores import FAISS
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document
-from langchain_core.prompts import ChatPromptTemplate
-
-# --- 3. 彈性引入 Chain (解決版本相容性) ---
-try:
-    # 優先嘗試新版 LCEL 語法
-    from langchain.chains import create_retrieval_chain
-    from langchain.chains.combine_documents import create_stuff_documents_chain
-    USE_LCEL = True
-except ImportError:
-    # 如果失敗，回退到舊版 QA Chain (這通常都存在)
-    from langchain.chains import RetrievalQA
-    USE_LCEL = False
-
 # 設定頁面
-st.set_page_config(page_title="Archie's RAG (Groq Edition)", layout="wide")
+st.set_page_config(page_title="Archie's RAG (Manual Mode)", layout="wide")
 
-class GroqRAGEngine:
+class ManualGroqEngine:
+    """
+    手動版 Groq RAG 引擎。
+    不使用 create_retrieval_chain，避免型別錯誤。
+    """
     def __init__(self, api_key: str):
         if not api_key:
             raise ValueError("Groq API Key is required")
         
         os.environ["GROQ_API_KEY"] = api_key
         
-        # 初始化 Embedding
-        with st.spinner("正在載入向量模型..."):
+        # 1. 初始化 Embedding (HuggingFace)
+        with st.spinner("正在初始化向量模型..."):
             self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         
-        # 初始化 LLM
+        # 2. 初始化 LLM (Groq)
         self.llm = ChatGroq(
             model="llama3-8b-8192", 
             temperature=0
         )
-        self.chain = None
+        self.vector_store = None
 
     def ingest_text(self, text: str):
+        # 切分文本
         docs = [Document(page_content=text, metadata={"source": "upload"})]
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         splits = splitter.split_documents(docs)
@@ -55,44 +47,47 @@ class GroqRAGEngine:
         if not splits:
             raise ValueError("文本太短")
 
-        vector_store = FAISS.from_documents(splits, self.embeddings)
-        retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-
-        # 根據引入結果選擇不同的建立方式
-        if USE_LCEL:
-            prompt = ChatPromptTemplate.from_template("""
-            你是一個專業的 AI 助手。請根據以下上下文回答問題：
-            <context>
-            {context}
-            </context>
-            問題：{input}
-            """)
-            doc_chain = create_stuff_documents_chain(self.llm, prompt)
-            self.chain = create_retrieval_chain(retriever, doc_chain)
-        else:
-            # 舊版 Fallback 邏輯
-            self.chain = RetrievalQA.from_chain_type(
-                llm=self.llm,
-                chain_type="stuff",
-                retriever=retriever
-            )
+        # 建立向量資料庫
+        self.vector_store = FAISS.from_documents(splits, self.embeddings)
 
     def ask(self, query: str):
-        if not self.chain:
-            return "請先建立索引"
+        if not self.vector_store:
+            return {"answer": "請先建立索引", "context": []}
         
-        if USE_LCEL:
-            response = self.chain.invoke({"input": query})
-            return {"answer": response["answer"], "context": response.get("context", [])}
-        else:
-            # 舊版回傳格式不同
-            response = self.chain.invoke({"query": query})
-            return {"answer": response["result"], "context": response.get("source_documents", [])}
+        # --- 手動 RAG 流程 (繞過錯誤的關鍵) ---
+        
+        # 1. 檢索 (Retrieval): 直接找最像的 3 段文字
+        docs = self.vector_store.similarity_search(query, k=3)
+        
+        # 2. 整理上下文 (Format)
+        context_text = "\n\n".join([d.page_content for d in docs])
+        
+        # 3. 組合 Prompt
+        prompt = ChatPromptTemplate.from_template("""
+        你是一個專業的 AI 助手。請"只"根據以下的上下文資訊來回答使用者的問題。
+        如果上下文沒有答案，請直接說「我不知道」。
+
+        [上下文開始]
+        {context}
+        [上下文結束]
+
+        使用者問題：{input}
+        """)
+        
+        # 4. 呼叫模型 (Generation)
+        # 我們手動把變數填進去，不透過 Chain
+        final_prompt = prompt.format_messages(context=context_text, input=query)
+        response = self.llm.invoke(final_prompt)
+        
+        return {
+            "answer": response.content,
+            "context": docs
+        }
 
 # --- UI ---
 def main():
-    st.title("⚡ 極速 RAG 系統 (Fixed Version)")
-    st.caption("Deployment Fix: Version Pinning & Import Fallback")
+    st.title("⚡ 極速 RAG 系統 (Final Fix)")
+    st.caption("Mode: Manual Execution (Bypassing Chain Errors)")
     
     if "engine" not in st.session_state:
         st.session_state.engine = None
@@ -106,7 +101,7 @@ def main():
         if st.button("建立索引"):
             if api_key and txt_input:
                 try:
-                    engine = GroqRAGEngine(api_key)
+                    engine = ManualGroqEngine(api_key)
                     engine.ingest_text(txt_input)
                     st.session_state.engine = engine
                     st.session_state.messages = []
@@ -128,7 +123,15 @@ def main():
                 try:
                     result = st.session_state.engine.ask(prompt)
                     answer = result["answer"]
+                    
                     st.chat_message("assistant").write(answer)
+                    
+                    # 顯示來源
+                    if result["context"]:
+                        with st.expander("參考來源"):
+                            for doc in result["context"]:
+                                st.info(doc.page_content[:200] + "...")
+
                     st.session_state.messages.append({"role": "assistant", "content": answer})
                 except Exception as e:
                     st.error(f"生成失敗: {e}")
