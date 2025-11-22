@@ -14,12 +14,12 @@ except ImportError as e:
     st.stop()
 
 # 設定頁面
-st.set_page_config(page_title="Archie's RAG (Manual Mode)", layout="wide")
+st.set_page_config(page_title="Archie's RAG (Llama 3.3)", layout="wide")
 
 class ManualGroqEngine:
     """
     手動版 Groq RAG 引擎。
-    不使用 create_retrieval_chain，避免型別錯誤。
+    使用最新的 Llama 3.3 模型。
     """
     def __init__(self, api_key: str):
         if not api_key:
@@ -32,8 +32,9 @@ class ManualGroqEngine:
             self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         
         # 2. 初始化 LLM (Groq)
+        # 更新為 Llama 3.3 (70B Versatile) - 目前 Groq 最強模型
         self.llm = ChatGroq(
-            model="llama3-8b-8192", 
+            model="llama-3.3-70b-versatile", 
             temperature=0
         )
         self.vector_store = None
@@ -54,12 +55,12 @@ class ManualGroqEngine:
         if not self.vector_store:
             return {"answer": "請先建立索引", "context": []}
         
-        # --- 手動 RAG 流程 (繞過錯誤的關鍵) ---
+        # --- 手動 RAG 流程 ---
         
-        # 1. 檢索 (Retrieval): 直接找最像的 3 段文字
+        # 1. 檢索
         docs = self.vector_store.similarity_search(query, k=3)
         
-        # 2. 整理上下文 (Format)
+        # 2. 整理上下文
         context_text = "\n\n".join([d.page_content for d in docs])
         
         # 3. 組合 Prompt
@@ -74,8 +75,7 @@ class ManualGroqEngine:
         使用者問題：{input}
         """)
         
-        # 4. 呼叫模型 (Generation)
-        # 我們手動把變數填進去，不透過 Chain
+        # 4. 呼叫模型
         final_prompt = prompt.format_messages(context=context_text, input=query)
         response = self.llm.invoke(final_prompt)
         
@@ -86,8 +86,8 @@ class ManualGroqEngine:
 
 # --- UI ---
 def main():
-    st.title("⚡ 極速 RAG 系統 (Final Fix)")
-    st.caption("Mode: Manual Execution (Bypassing Chain Errors)")
+    st.title("⚡ 極速 RAG 系統 (Llama 3.3)")
+    st.caption("Model: Llama-3.3-70b-versatile on Groq")
     
     if "engine" not in st.session_state:
         st.session_state.engine = None
@@ -119,14 +119,13 @@ def main():
         st.chat_message("user").write(prompt)
         
         if st.session_state.engine:
-            with st.spinner("Thinking..."):
+            with st.spinner("Llama 3.3 正在思考..."):
                 try:
                     result = st.session_state.engine.ask(prompt)
                     answer = result["answer"]
                     
                     st.chat_message("assistant").write(answer)
                     
-                    # 顯示來源
                     if result["context"]:
                         with st.expander("參考來源"):
                             for doc in result["context"]:
